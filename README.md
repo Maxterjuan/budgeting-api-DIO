@@ -1,153 +1,85 @@
 # Budgeting API com Spring AI
 
-API de orçamento pessoal controlada por **voz**. O usuário envia um áudio (ex.: "gastei 30 reais no almoço"), a IA entende o pedido, executa a ação real no sistema e responde em áudio.
+Projeto do desafio da DIO com Spring Boot e Spring AI. É uma API de orçamento que funciona por voz: eu mando um áudio falando, por exemplo, "gastei 30 reais no almoço", a IA entende, salva a transação e responde em áudio.
 
-## Fluxo principal
+## O que o projeto faz
 
-1. O cliente envia um áudio para `POST /api/ai/voice`.
-2. `TranscriptionModel` transforma o áudio em texto.
-3. `ChatClient` envia o texto ao modelo, que escolhe uma *tool* (`@Tool`).
-4. A tool chama um **caso de uso** da camada `application`, que grava ou consulta transações.
-5. O texto final da resposta vira áudio WAV (`TextToSpeechModel`).
+1. Recebe um áudio
+2. Transforma o áudio em texto
+3. A IA entende o que foi pedido e chama uma função da aplicação
+4. A função cria ou consulta as transações
+5. A resposta volta em áudio
 
-Os **mesmos casos de uso** atendem o REST (`/api/transactions`) e a IA: a IA nunca acessa o repositório diretamente.
+## Melhoria que eu fiz
 
-## Arquitetura
+Adicionei validações antes de salvar uma transação. Percebi que a IA pode errar o que entendeu do áudio, então a API agora não aceita:
 
-```
-domain/           Transaction, TransactionId, TransactionType, TransactionRepository (contrato)
-application/      CreateTransactionUseCase, ListTransactionsUseCase, GetSummaryUseCase, Period
-infrastructure/
-  persistence/    Entidade JPA + adapter que implementa TransactionRepository
-  web/            Controller REST, DTOs, tratamento de erros
-  ai/             BudgetingTools (@Tool), AiAssistantService, VoiceAssistantController
-```
+- data no futuro
+- valor maior que 10 milhões
+- valor com mais de 2 casas decimais
+- descrição com mais de 100 caracteres
+- categoria com mais de 50 caracteres
+
+Também deixei a mensagem de erro mais clara quando a IA manda uma data em formato errado.
+
+Coloquei as regras em `Transaction.java` e `CreateTransactionUseCase.java` (e um ajuste em `BudgetingTools.java`) para valer tanto para a IA quanto para o REST. Também criei 10 testes novos em `UseCasesTest.java`.
 
 ## Tecnologias
 
-Java 21 · Spring Boot 3.5 · Spring AI 1.1 (cliente OpenAI apontando para a **Groq**, que é compatível) · Spring Data JPA · H2 (memória) · Gradle · JUnit 5
-
-Modelos (em `application.properties`): chat `openai/gpt-oss-120b`, transcrição `whisper-large-v3-turbo`, voz `canopylabs/orpheus-v1-english`.
+Java 21, Spring Boot, Spring AI, Spring Data JPA, H2, Gradle e JUnit 5. Usei a Groq como provedor de IA.
 
 ## Como executar
 
-Pré-requisitos: JDK 21 e uma chave da [Groq](https://console.groq.com/keys).
+Precisa do JDK 21 e de uma chave da Groq (https://console.groq.com/keys).
 
-```bash
-export GROQ_API_KEY="sua_chave_aqui"   # nunca commite a chave
+```
+export GROQ_API_KEY="sua_chave"
 ./gradlew bootRun
-./gradlew test                          # os testes não usam a Groq/OpenAI
 ```
 
-No Windows (PowerShell): `$env:GROQ_API_KEY="sua_chave_aqui"; .\gradlew.bat bootRun`
+No Windows (PowerShell):
 
-A API sobe em `http://localhost:8080`. O banco é H2 em memória: os dados somem ao reiniciar.
-
-## Como testar o fluxo principal
-
-**1. Fluxo completo com áudio** (grave um arquivo `comando.mp3`, `.wav` ou `.m4a` dizendo, por exemplo, "gastei 45 reais com uber hoje"):
-
-```bash
-curl -X POST http://localhost:8080/api/ai/voice \
-  -F "audio=@comando.mp3" \
-  --output resposta.wav
+```
+$env:GROQ_API_KEY="sua_chave"
+.\gradlew.bat bootRun
 ```
 
-Abra `resposta.wav` para ouvir a resposta. Um exemplo de resposta gerada está em [`docs/exemplo-resposta.wav`](docs/exemplo-resposta.wav).
+A API fica em http://localhost:8080. A chave não está no código, ela vem de variável de ambiente.
 
-**2. Mesmo fluxo só com texto** (para depurar as tools sem gravar áudio):
+## Como testar
 
-```bash
-curl -X POST http://localhost:8080/api/ai/text \
-  -H "Content-Type: application/json" \
-  -d '{"text":"Recebi 5000 reais de salário"}'
+Com áudio (use um arquivo seu, tipo `comando.mp3`):
 
-curl -X POST http://localhost:8080/api/ai/text \
-  -H "Content-Type: application/json" \
-  -d '{"text":"Quanto eu gastei este mês?"}'
+```
+curl -X POST http://localhost:8080/api/ai/voice -F "audio=@comando.mp3" --output resposta.wav
 ```
 
-**3. Conferir pelo REST que a IA realmente gravou no banco:**
+Um exemplo de resposta da IA está em `docs/exemplo-resposta.wav`.
 
-```bash
+Só com texto, para testar sem gravar:
+
+```
+curl -X POST http://localhost:8080/api/ai/text -H "Content-Type: application/json" -d '{"text":"Recebi 5000 reais de salário"}'
+```
+
+Para ver o que foi salvo:
+
+```
 curl http://localhost:8080/api/transactions
-curl http://localhost:8080/api/transactions/summary
 ```
 
-**4. REST direto (sem IA):**
+Para testar a melhoria (deve dar erro 400 porque a data é futura):
 
-```bash
-curl -X POST http://localhost:8080/api/transactions \
-  -H "Content-Type: application/json" \
-  -d '{"description":"almoço","amount":32.50,"type":"EXPENSE","category":"alimentação"}'
+```
+curl -X POST http://localhost:8080/api/transactions -H "Content-Type: application/json" -d '{"description":"viagem","amount":100,"type":"EXPENSE","date":"2099-01-01"}'
 ```
 
-## Melhoria implementada: validações antes de salvar a transação
+Para rodar os testes automáticos:
 
-**Limitação identificada.** O projeto base só validava "descrição preenchida" e "valor > 0". Como o comando vem de uma transcrição de áudio e quem preenche os parâmetros da *tool* é o modelo, dados estranhos podiam chegar ao banco: datas no futuro ("amanhã", ano errado), valores absurdos, valores com 3+ casas decimais (que o banco arredondava em silêncio, coluna `scale = 2`) e textos enormes.
-
-**O que mudou.** Agora uma transação só é gravada se passar por estas regras:
-
-| Regra | Onde | Mensagem de erro |
-|---|---|---|
-| Data não pode ser futura | `CreateTransactionUseCase` | "A data da transação não pode estar no futuro (hoje é ...)" |
-| Valor máximo de 10.000.000 | `Transaction` (domínio) | "O valor máximo por transação é ..." |
-| No máximo 2 casas decimais | `Transaction` | "O valor deve ter no máximo 2 casas decimais." |
-| Descrição até 100 caracteres | `Transaction` | "A descrição deve ter no máximo 100 caracteres." |
-| Categoria até 50 caracteres | `Transaction` | "A categoria deve ter no máximo 50 caracteres." |
-| Descrição é "trimada" (sem espaços nas pontas) | `Transaction` | n/a |
-| Data inválida vinda da IA (ex.: `amanhã`) vira erro claro | `BudgetingTools` | "Data inválida: '...'. Use o formato yyyy-MM-dd." |
-
-**Por que assim.** As regras de negócio ficam no **domínio/caso de uso**, e não na *tool* nem no controller. Assim valem para os dois caminhos (REST e IA) sem duplicar código. No REST, o erro vira `400 Bad Request` pelo `ApiExceptionHandler`. Na IA, a exceção volta para o modelo como resultado da *tool*, e ele pode explicar o problema ao usuário ou corrigir e tentar de novo.
-
-**Arquivos alterados:**
-- `domain/Transaction.java`: limites, casas decimais e normalização
-- `application/CreateTransactionUseCase.java`: bloqueio de data futura (usa o `Clock` injetado, então é testável)
-- `infrastructure/ai/BudgetingTools.java`: erro claro para data em formato inválido
-- `test/.../UseCasesTest.java`: 10 novos testes (total de 15)
-
-**Exemplos:**
-
-```bash
-# data futura -> 400
-curl -X POST http://localhost:8080/api/transactions \
-  -H "Content-Type: application/json" \
-  -d '{"description":"viagem","amount":100,"type":"EXPENSE","date":"2099-01-01"}'
-
-# 3 casas decimais -> 400
-curl -X POST http://localhost:8080/api/transactions \
-  -H "Content-Type: application/json" \
-  -d '{"description":"teste","amount":10.999,"type":"EXPENSE"}'
 ```
-
-Resposta esperada (formato `ProblemDetail`):
-
-```json
-{"type":"about:blank","title":"Bad Request","status":400,"detail":"O valor deve ter no máximo 2 casas decimais.","instance":"/api/transactions"}
-```
-
-Pela voz, algo como *"gastei 20 reais amanhã no cinema"* deve fazer o modelo receber o erro da *tool* e avisar que não é possível lançar uma despesa com data futura.
-
-## Testes
-
-```bash
 ./gradlew test
 ```
 
-Os testes de caso de uso usam um repositório em memória (`InMemoryTransactionRepository`) e um `Clock` fixo, então não dependem de banco, rede nem chave de API. Cobrem: data padrão, resumo por categoria, período, e todas as validações da melhoria (incluindo os limites exatos, como valor igual ao máximo e `10.500` com zeros à direita).
+## O que eu aprendi
 
-## Estrutura de pastas
-
-```
-src/main/java/dio/budgeting/...   código (domain, application, infrastructure)
-src/test/java/...                 testes
-docs/exemplo-resposta.wav         exemplo de resposta em áudio gerada pela IA
-```
-
-## O que aprendi
-
-- Como o fluxo **áudio → texto → modelo → tool → caso de uso → texto → áudio** se conecta usando `TranscriptionModel`, `ChatClient` e `TextToSpeechModel` do Spring AI.
-- Que o *Tool Calling* só **pede** a execução de uma função: quem decide se a operação é válida é o código da aplicação, não o modelo. Por isso a IA nunca deve acessar o repositório direto.
-- Que vale validar no **domínio**: a mesma regra protege REST e IA, e o erro da *tool* volta para o modelo, que consegue se explicar ao usuário.
-- Que trocar de provedor (OpenAI → Groq) é só configuração, porque a API é compatível.
-- Escrever testes com `Clock` fixo e repositório falso para testar sem depender de rede.
+Aprendi como conectar uma IA com uma aplicação Java de verdade. A IA não salva nada sozinha, ela só pede para o código executar uma função. Aprendi também que não dá para confiar 100% no que a IA entende, então é importante validar os dados antes de salvar. Além disso, aprendi a fazer testes sem precisar da internet nem da chave da IA.
